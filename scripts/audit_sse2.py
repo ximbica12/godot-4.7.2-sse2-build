@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reject x86 instructions newer than SSE2 in the built PE executable."""
+"""Basic post-link audit for a Windows x64 SSE2-baseline Godot executable."""
 
 from pathlib import Path
 import re
@@ -13,6 +13,11 @@ if len(sys.argv) != 2:
 binary = Path(sys.argv[1])
 if not binary.is_file():
     raise SystemExit(f"Executable not found: {binary}")
+
+raw = binary.read_bytes()
+startup_gate = b"A CPU with SSE4.2 instruction set support is required."
+if startup_gate in raw:
+    raise SystemExit("The SSE4.2 startup dialog is still embedded in the executable.")
 
 objdump = shutil.which("x86_64-w64-mingw32-objdump") or shutil.which("objdump")
 if not objdump:
@@ -57,4 +62,5 @@ if violations:
         print(f"  {line}")
     raise SystemExit(1)
 
-print(f"ISA audit passed: no instructions newer than SSE2 found in {binary}.")
+print(f"ISA audit passed: no known post-SSE2 instructions found in {binary}.")
+print("SSE4.2 Windows startup gate is absent.")

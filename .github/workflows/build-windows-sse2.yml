@@ -49,7 +49,7 @@ jobs:
           "$RUNNER_TEMP/scons-venv/bin/python" -m pip install "scons==4.10.1"
 
       - name: Patch Godot to use the SSE2 baseline
-        run: python3 scripts/patch_sse2.py godot/SConstruct
+        run: python3 scripts/patch_sse2.py godot/SConstruct godot/platform/windows/SCsub
 
       - name: Build Windows x64 release runtime
         env:

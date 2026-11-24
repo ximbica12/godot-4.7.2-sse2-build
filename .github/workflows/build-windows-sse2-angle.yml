@@ -90,8 +90,7 @@ jobs:
           set -euo pipefail
           for lib in angle-static/bin/libANGLE.windows.x86_64.a angle-static/bin/libEGL.windows.x86_64.a angle-static/bin/libGLES.windows.x86_64.a; do
             echo "Checking $lib"
-            x86_64-w64-mingw32-objdump -d --no-show-raw-insn "$lib" > "$RUNNER_TEMP/$(basename "$lib").disasm"
-            python3 scripts/audit_sse2.py "$RUNNER_TEMP/$(basename "$lib").disasm"
+            python3 scripts/audit_sse2.py "$lib"
           done
 
       - name: Build Windows x64 release runtime with source-built ANGLE D3D11

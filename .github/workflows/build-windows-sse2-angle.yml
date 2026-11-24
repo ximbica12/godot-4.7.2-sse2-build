@@ -7,13 +7,14 @@ on:
       - main
     paths:
       - ".github/workflows/build-windows-sse2-angle.yml"
+      - "scripts/**"
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: MinGW-w64 x64 SSE2 + ANGLE (D3D11)
+    name: MinGW-w64 x64 SSE2 + source-built ANGLE (D3D11)
     runs-on: ubuntu-24.04
     timeout-minutes: 360
 
@@ -29,6 +30,15 @@ jobs:
           path: godot
           fetch-depth: 1
 
+      - name: Checkout ANGLE static source and submodules
+        uses: actions/checkout@v4
+        with:
+          repository: godotengine/godot-angle-static
+          ref: godot-static
+          path: angle-static
+          fetch-depth: 1
+          submodules: recursive
+
       - name: Install MinGW-w64 toolchain
         run: |
           sudo apt-get update
@@ -38,27 +48,7 @@ jobs:
             gcc-mingw-w64-x86-64-posix \
             g++-mingw-w64-x86-64-posix \
             python3 \
-            python3-venv \
-            curl \
-            unzip
-
-      - name: Install ANGLE static libraries for MinGW x86_64
-        run: |
-          set -euo pipefail
-          mkdir -p godot/bin/build_deps/angle-x86_64-gcc
-          curl --fail --location --retry 3 \
-            "https://github.com/godotengine/godot-angle-static/releases/download/chromium/7219/godot-angle-static-x86_64-gcc-release.zip" \
-            --output "$RUNNER_TEMP/godot-angle-static-x86_64-gcc-release.zip"
-          unzip -q "$RUNNER_TEMP/godot-angle-static-x86_64-gcc-release.zip" \
-            -d godot/bin/build_deps/angle-x86_64-gcc
-          echo "ANGLE libraries installed:"
-          angle_dir="godot/bin/build_deps/angle-x86_64-gcc"
-          find "$angle_dir" -maxdepth 1 -type f -printf '%f\\n'
-          # The official MinGW ANGLE archive already extracts the import libraries here.
-          test -f "$angle_dir/libEGL.windows.x86_64.a"
-          test -f "$angle_dir/libGLES.windows.x86_64.a"
-          test -f "$angle_dir/libANGLE.windows.x86_64.a"
-          echo "All three ANGLE import libraries are present."
+            python3-venv
 
       - name: Install SCons
         run: |
@@ -66,10 +56,45 @@ jobs:
           "$RUNNER_TEMP/scons-venv/bin/python" -m pip install --upgrade pip
           "$RUNNER_TEMP/scons-venv/bin/python" -m pip install "scons==4.10.1"
 
-      - name: Patch Godot to use the SSE2 baseline
-        run: python3 scripts/patch_sse2.py godot/SConstruct godot/platform/windows/SCsub
+      - name: Patch Godot and ANGLE to use the SSE2 baseline
+        run: |
+          python3 scripts/patch_sse2.py godot/SConstruct godot/platform/windows/SCsub
+          python3 scripts/patch_angle_sse2.py angle-static/SConstruct
 
-      - name: Build Windows x64 release runtime with ANGLE D3D11
+      - name: Generate ANGLE source headers
+        run: |
+          set -euo pipefail
+          cd angle-static
+          git submodule status --recursive
+          ./update_angle.sh
+
+      - name: Build ANGLE static libraries for Windows x64 SSE2
+        env:
+          MINGW_PREFIX: /usr
+        run: |
+          set -euo pipefail
+          cd angle-static
+          "$RUNNER_TEMP/scons-venv/bin/scons" -j2 \
+            platform=windows \
+            arch=x86_64 \
+            use_mingw=yes \
+            use_llvm=no \
+            use_static_cpp=yes
+          test -f bin/libANGLE.windows.x86_64.a
+          test -f bin/libEGL.windows.x86_64.a
+          test -f bin/libGLES.windows.x86_64.a
+          echo "ANGLE static libraries built with x86-64-v1 (SSE2)."
+
+      - name: Audit ANGLE static libraries for post-SSE2 instructions
+        run: |
+          set -euo pipefail
+          for lib in angle-static/bin/libANGLE.windows.x86_64.a angle-static/bin/libEGL.windows.x86_64.a angle-static/bin/libGLES.windows.x86_64.a; do
+            echo "Checking $lib"
+            x86_64-w64-mingw32-objdump -d --no-show-raw-insn "$lib" > "$RUNNER_TEMP/$(basename "$lib").disasm"
+            python3 scripts/audit_sse2.py "$RUNNER_TEMP/$(basename "$lib").disasm"
+          done
+
+      - name: Build Windows x64 release runtime with source-built ANGLE D3D11
         env:
           MINGW_PREFIX: /usr
         run: |
@@ -89,7 +114,7 @@ jobs:
             accesskit=no \
             d3d12=no \
             angle=yes \
-            angle_libs="$GITHUB_WORKSPACE/godot/bin/build_deps/angle-x86_64-gcc" \
+            angle_libs="$GITHUB_WORKSPACE/angle-static/bin" \
             vulkan=yes \
             opengl3=yes
 
@@ -114,9 +139,11 @@ jobs:
           {
             echo "Godot tag: 4.7.2-stable"
             echo "Godot source commit: $(git -C godot rev-parse HEAD)"
+            echo "ANGLE source commit: $(git -C angle-static rev-parse HEAD)"
             echo "Target: Windows x86_64 template_release"
             echo "CPU baseline: x86-64-v1 (SSE2)"
             echo "Compatibility renderer backend: ANGLE / Direct3D 11"
+            echo "ANGLE: built from source with x86-64-v1 flags"
             echo "Compiler:"
             x86_64-w64-mingw32-g++ --version | head -n 1
             echo "SCons:"

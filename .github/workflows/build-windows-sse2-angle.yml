@@ -37,7 +37,20 @@ jobs:
           ref: godot-static
           path: angle-static
           fetch-depth: 1
-          submodules: recursive
+          submodules: false
+
+      - name: Initialize only public ANGLE build dependencies
+        run: |
+          set -euo pipefail
+          cd angle-static
+          # Do not recurse into ANGLE's entire Chromium dependency tree:
+          # it includes the private chrome-internal.googlesource.com/angle/es-cts submodule,
+          # which is not needed by this static Godot ANGLE build.
+          git submodule update --init --depth 1 angle third_party/astc-encoder/src third_party/zlib
+          test -f angle/src/commit_id.py
+          test -d third_party/astc-encoder/src/Source
+          test -f third_party/zlib/zlib.h
+          echo "Initialized only the three public submodules required by godot-angle-static."
 
       - name: Install MinGW-w64 toolchain
         run: |
@@ -65,7 +78,7 @@ jobs:
         run: |
           set -euo pipefail
           cd angle-static
-          git submodule status --recursive
+          git submodule status angle third_party/astc-encoder/src third_party/zlib
           ./update_angle.sh
 
       - name: Build ANGLE static libraries for Windows x64 SSE2

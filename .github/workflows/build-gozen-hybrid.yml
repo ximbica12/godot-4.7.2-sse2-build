@@ -11,6 +11,7 @@ on:
   push:
     branches:
       - gozen-hybrid-hwdecode
+      - gozen-hybrid-hwdecode-v2
     paths:
       - ".github/workflows/build-gozen-hybrid.yml"
       - "scripts/patch_gozen_hybrid.py"

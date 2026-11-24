@@ -76,7 +76,7 @@ replace_once(
 # Correct FFmpeg's get_format callback signature.
 replace_once(
     ffmpeg_hpp,
-     '\tstatic enum AVPixelFormat get_hw_format(AVCodecContext* codec_ctx, const enum AVPixelFormat* pix_fmts);\n',
+    '\tstatic enum AVPixelFormat get_hw_format(const enum AVPixelFormat* pix_fmt, enum AVPixelFormat* hw_pix_fmt);\n',
     '\tstatic enum AVPixelFormat get_hw_format(AVCodecContext* codec_ctx, const enum AVPixelFormat* pix_fmts);\n',
 )
 replace_between(

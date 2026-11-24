@@ -52,8 +52,19 @@ jobs:
           unzip -q "$RUNNER_TEMP/godot-angle-static-x86_64-gcc-release.zip" \
             -d godot/bin/build_deps/angle-x86_64-gcc
           echo "ANGLE libraries installed:"
-          find godot/bin/build_deps/angle-x86_64-gcc -maxdepth 2 -type f | sed 's#^.*/##' | head -40
-          test -n "$(find godot/bin/build_deps/angle-x86_64-gcc -type f -name '*ANGLE*' -print -quit)"
+          angle_dir="godot/bin/build_deps/angle-x86_64-gcc"
+          find "$angle_dir" -type f -print
+          # The archive may place import libraries in a nested directory,
+          # while Godot's MinGW linker configuration searches angle_dir itself.
+          while IFS= read -r -d '' lib; do
+            if [ "$(dirname "$lib")" != "$angle_dir" ]; then
+              cp -f "$lib" "$angle_dir/"
+            fi
+          done < <(find "$angle_dir" -type f \\( -name 'libEGL.windows.x86_64.a' -o -name 'libGLES.windows.x86_64.a' -o -name 'libANGLE.windows.x86_64.a' \\) -print0)
+          test -f "$angle_dir/libEGL.windows.x86_64.a"
+          test -f "$angle_dir/libGLES.windows.x86_64.a"
+          test -f "$angle_dir/libANGLE.windows.x86_64.a"
+          echo "All three ANGLE import libraries are in the exact linker search directory."
 
       - name: Install SCons
         run: |

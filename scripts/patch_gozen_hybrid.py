@@ -55,10 +55,10 @@ video_cpp = root / "src/gozen_video.cpp"
 replace_once(build_py, '    "--disable-hwaccels",\n', "")
 replace_once_in_block(
     build_py,
-    "def compile_ffmpeg_windows(arch: str) -> None:\\n",
-    "\\ndef compile_ffmpeg_macos",
-    '        "--disable-asm",\\n',
-    '        "--enable-x86asm",\\n',
+    "def compile_ffmpeg_windows(arch: str) -> None:\n",
+    "\ndef compile_ffmpeg_macos",
+    '        "--disable-asm",\n',
+    '        "--enable-x86asm",\n',
 )
 replace_once(
     build_py,
@@ -76,8 +76,8 @@ replace_once(
 # Correct FFmpeg's get_format callback signature.
 replace_once(
     ffmpeg_hpp,
-    '\\tstatic enum AVPixelFormat get_hw_format(AVCodecContext* codec_ctx, const enum AVPixelFormat* pix_fmts);\n',
-    '    static enum AVPixelFormat get_hw_format(AVCodecContext* codec_ctx, const enum AVPixelFormat* pix_fmts);\n',
+     '\tstatic enum AVPixelFormat get_hw_format(AVCodecContext* codec_ctx, const enum AVPixelFormat* pix_fmts);\n',
+    '\tstatic enum AVPixelFormat get_hw_format(AVCodecContext* codec_ctx, const enum AVPixelFormat* pix_fmts);\n',
 )
 replace_between(
     ffmpeg_cpp,

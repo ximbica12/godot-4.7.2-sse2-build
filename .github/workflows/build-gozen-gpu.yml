@@ -52,10 +52,21 @@ jobs:
           python3 -m py_compile gozen/patch_gpu.py
           python3 gozen/patch_gpu.py upstream
           python3 -m py_compile upstream/build.py upstream/SConstruct
+          # Static FFmpeg/libaom dependencies require MinGW's POSIX runtime at the end of the link line.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("upstream/SConstruct")
+          s = p.read_text()
+          old = 'LIBS=["ws2_32", "bcrypt", "secur32", "shlwapi", "mfuuid", "strmiids", "ole32", "user32", "uuid"],'
+          assert s.count(old) == 1, "Unexpected Windows link configuration"
+          p.write_text(s.replace(old, old.replace('"uuid"]', '"uuid", "winpthread"]'), 1))
+          PY
           git -C upstream diff --check
           git -C upstream diff > "$RUNNER_TEMP/gozen-gpu.patch"
-          printf '#include <windows.h>\n#include <d3d11.h>\n#include <dxva2api.h>\nint main(){return 0;}\n' > "$RUNNER_TEMP/preflight.cpp"
-          x86_64-w64-mingw32-g++ -march=x86-64 "$RUNNER_TEMP/preflight.cpp" -o "$RUNNER_TEMP/preflight.exe"
+          printf '#include <windows.h>\n#include <d3d11.h>\n#include <d3d9.h>\n#include <dxva2api.h>\nint main(){return 0;}\n' > "$RUNNER_TEMP/preflight.cpp"
+          x86_64-w64-mingw32-g++ -march=x86-64 "$RUNNER_TEMP/preflight.cpp" -static -lwinpthread -o "$RUNNER_TEMP/preflight.exe"
+          lib="$(x86_64-w64-mingw32-g++ -print-file-name=libwinpthread.a)"
+          test -f "$lib"
       - name: Compile FFmpeg with H264 hardware decoder preflight
         working-directory: upstream
         run: |

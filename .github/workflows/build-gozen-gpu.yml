@@ -1,0 +1,196 @@
+name: GoZen GPU First Windows x64
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-gozen-gpu.yml'
+      - 'gozen/**'
+permissions:
+  contents: read
+concurrency:
+  group: gozen-gpu-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Checkout pinned GDE GoZen source
+        uses: actions/checkout@v4
+        with:
+          repository: VoylinsGamedevJourney/gde_gozen
+          ref: fa01fc6128f8a6d08162c2b5ee28501f45a44bc1
+          path: upstream
+          submodules: false
+          fetch-depth: 1
+      - name: Fetch only required public dependencies
+        working-directory: upstream
+        run: |
+          set -euo pipefail
+          git submodule update --init --depth 1 ffmpeg godot_cpp libvpx libaom
+          git submodule status
+          test "$(git -C ffmpeg rev-parse HEAD)" = 5a1f107b4c78318f318897900acad1b6c6aa3f9d
+          test "$(git -C godot_cpp rev-parse HEAD)" = b0e3b1e4b78a606f48d162898afb5eeda533d2a9
+          test "$(git -C libvpx rev-parse HEAD)" = 3fce57ecc905d95a4619f33d09851d68c5a88663
+          test "$(git -C libaom rev-parse HEAD)" = de575da20409b4e1fa477c5615837715999c905a
+          test -f ffmpeg/configure
+          test -f godot_cpp/SConstruct
+          test -f libvpx/configure
+          test -f libaom/CMakeLists.txt
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix binutils-mingw-w64-x86-64 cmake ninja-build nasm yasm pkg-config python3-venv ffmpeg
+          python3 -m venv "$RUNNER_TEMP/scons"
+          "$RUNNER_TEMP/scons/bin/pip" install 'scons==4.10.1'
+          echo "$RUNNER_TEMP/scons/bin" >> "$GITHUB_PATH"
+          x86_64-w64-mingw32-g++ --version
+      - name: Validate and apply source patch
+        run: |
+          python3 -m py_compile gozen/patch_gpu.py
+          python3 gozen/patch_gpu.py upstream
+          python3 -m py_compile upstream/build.py upstream/SConstruct
+          git -C upstream diff --check
+          git -C upstream diff > "$RUNNER_TEMP/gozen-gpu.patch"
+          printf '#include <windows.h>\n#include <d3d11.h>\n#include <dxva2api.h>\nint main(){return 0;}\n' > "$RUNNER_TEMP/preflight.cpp"
+          x86_64-w64-mingw32-g++ -march=x86-64 "$RUNNER_TEMP/preflight.cpp" -o "$RUNNER_TEMP/preflight.exe"
+      - name: Compile FFmpeg with H264 hardware decoder preflight
+        working-directory: upstream
+        run: |
+          python3 -c "import build; build.THREADS=2; build.compile_ffmpeg_windows('x86_64')"
+          test -f ffmpeg/bin/lib/libavcodec.a
+          grep -Fx '#define CONFIG_H264_D3D11VA2_HWACCEL 1' ffmpeg/config_components.h
+          grep -Fx '#define CONFIG_H264_DXVA2_HWACCEL 1' ffmpeg/config_components.h
+      - name: Compile release DLL
+        working-directory: upstream
+        env:
+          MINGW_PREFIX: /usr
+        run: |
+          scons -j2 platform=windows arch=x86_64 target=template_release use_mingw=yes use_static_cpp=yes use_llvm=no lto=none optimize=speed
+          test -s test_room/addons/gde_gozen/bin/libgozen.windows.template_release.x86_64.dll
+      - name: Verify PE export and package candidate
+        run: |
+          set -euo pipefail
+          mkdir -p candidate
+          dll=upstream/test_room/addons/gde_gozen/bin/libgozen.windows.template_release.x86_64.dll
+          x86_64-w64-mingw32-objdump -f "$dll" > candidate/PE_INFO.txt
+          grep -F 'pei-x86-64' candidate/PE_INFO.txt
+          x86_64-w64-mingw32-objdump -p "$dll" > candidate/IMPORTS_EXPORTS.txt
+          grep -F 'gozen_library_init' candidate/IMPORTS_EXPORTS.txt
+          strings "$dll" > "$RUNNER_TEMP/gozen.strings"
+          grep -F 'GoZen GPU: D3D11VA decoded first frame' "$RUNNER_TEMP/gozen.strings"
+          grep -F 'GoZen GPU: DXVA2 decoded first frame' "$RUNNER_TEMP/gozen.strings"
+          grep -F 'GoZen GPU: software decoding' "$RUNNER_TEMP/gozen.strings"
+          cp "$dll" candidate/
+          cp "$RUNNER_TEMP/gozen-gpu.patch" candidate/SOURCE.patch
+          cp upstream/LICENSE candidate/LICENSE-GOZEN.txt
+          cp upstream/ffmpeg/COPYING.LGPLv2.1 candidate/LICENSE-FFMPEG.txt
+          cp upstream/libvpx/LICENSE candidate/LICENSE-LIBVPX.txt
+          cp upstream/libaom/LICENSE candidate/LICENSE-LIBAOM.txt
+          git -C upstream submodule status > candidate/SOURCE_VERSIONS.txt
+          git -C upstream rev-parse HEAD >> candidate/SOURCE_VERSIONS.txt
+          (cd candidate && sha256sum *.dll > SHA256SUMS.txt)
+          ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc2=size=320x240:rate=30 -t 2 -c:v libx264 -pix_fmt yuv420p -profile:v main -an -movflags +faststart candidate/test.mp4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GoZen-GPU-Candidate-NOT-VALIDATED
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 7
+  windows-smoke:
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: GoZen-GPU-Candidate-NOT-VALIDATED
+          path: candidate
+      - name: Download official Godot 4.7.2 editor
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/godotengine/godot-builds/releases/download/4.7.2-stable/Godot_v4.7.2-stable_win64.exe.zip'
+          Invoke-WebRequest -Uri $url -OutFile godot.zip
+          Expand-Archive godot.zip -DestinationPath editor
+      - name: Test extension loading and synthetic MP4 playback
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $engine = (Get-ChildItem editor -Recurse -Filter 'Godot_v4.7.2-stable_win64_console.exe' | Select-Object -First 1).FullName
+          if (-not $engine) { throw 'Godot console executable missing' }
+          $project = Join-Path $PWD 'smoke'
+          New-Item -ItemType Directory -Path $project | Out-Null
+          Copy-Item candidate/libgozen.windows.template_release.x86_64.dll $project
+          Copy-Item candidate/test.mp4 $project
+          @'
+          config_version=5
+          [application]
+          config/name="GoZen GPU smoke"
+          [rendering]
+          renderer/rendering_method="gl_compatibility"
+          '@ | Set-Content "$project/project.godot" -Encoding utf8
+          @'
+          [configuration]
+          entry_symbol = "gozen_library_init"
+          compatibility_minimum = "4.3"
+          [libraries]
+          windows.x86_64 = "res://libgozen.windows.template_release.x86_64.dll"
+          '@ | Set-Content "$project/gozen.gdextension" -Encoding utf8
+          @'
+          extends SceneTree
+          func _initialize():
+              call_deferred("run_test")
+          func run_test():
+              if not ClassDB.class_exists("GoZenVideo"):
+                  push_error("GDExtension did not register GoZenVideo")
+                  quit(1)
+                  return
+              var v = ClassDB.instantiate("GoZenVideo")
+              v.open("res://test.mp4")
+              if not v.is_open():
+                  push_error("Video open failed")
+                  quit(2)
+                  return
+              for i in range(12):
+                  if not v.next_frame(false):
+                      push_error("Frame decode failed")
+                      quit(3)
+                      return
+              if v.get_y_data().get_width() != 320 or v.get_y_data().get_height() != 240:
+                  push_error("Unexpected decoded image dimensions")
+                  quit(4)
+                  return
+              v.close()
+              print("GOZEN_SMOKE_PASS")
+              quit(0)
+          '@ | Set-Content "$project/smoke.gd" -Encoding utf8
+          New-Item -ItemType Directory -Path "$project/.godot" -Force | Out-Null
+          'res://gozen.gdextension' | Set-Content "$project/.godot/extension_list.cfg" -Encoding utf8
+          foreach ($mode in @('0','1')) {
+              $env:GOZEN_HWDEC = $mode
+              $stdout = Join-Path $PWD "smoke-$mode.log"
+              $stderr = Join-Path $PWD "smoke-$mode.err"
+              $arguments = "--headless --path `"$project`" --script res://smoke.gd"
+              $p = Start-Process -FilePath $engine -ArgumentList $arguments -Wait -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+              Get-Content $stdout
+              Get-Content $stderr
+              if ($p.ExitCode -ne 0 -or -not (Select-String -Path $stdout -SimpleMatch 'GOZEN_SMOKE_PASS' -Quiet)) {
+                  throw "Godot smoke test failed, mode $mode (exit $($p.ExitCode))"
+              }
+              if ($mode -eq '0' -and -not (Select-String -Path $stdout -SimpleMatch 'GoZen GPU: software decoding' -Quiet)) {
+                  throw 'Software fallback log missing'
+              }
+              Copy-Item $stdout candidate/
+              Copy-Item $stderr candidate/
+          }
+          Remove-Item candidate/test.mp4
+      - name: Publish smoke-tested GPU-first DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: GoZen-GPU-First-Windows-x64
+          path: candidate/
+          if-no-files-found: error
+          retention-days: 30

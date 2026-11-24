@@ -15,13 +15,29 @@ def replace_once(path: Path, old: str, new: str) -> None:
 
 def replace_between(path: Path, start: str, end: str, replacement: str) -> None:
     text = path.read_text(encoding="utf-8")
-    if text.count(start) != 1 or text.count(end) != 1:
-        raise SystemExit(f"{path}: expected unique block anchors. Upstream source changed; stopping safely.")
+    if text.count(start) != 1:
+        raise SystemExit(f"{path}: expected one start anchor. Upstream source changed; stopping safely.")
     a = text.index(start)
-    b = text.index(end, a + len(start))
-    if b <= a:
-        raise SystemExit(f"{path}: invalid patch block.")
+    b = text.find(end, a + len(start))
+    if b < 0:
+        raise SystemExit(f"{path}: end anchor not found after start.")
     path.write_text(text[:a] + replacement + text[b:], encoding="utf-8")
+
+
+def replace_once_in_block(path: Path, block_start: str, block_end: str, old: str, new: str) -> None:
+    text = path.read_text(encoding="utf-8")
+    if text.count(block_start) != 1:
+        raise SystemExit(f"{path}: expected one function start anchor.")
+    a = text.index(block_start)
+    b = text.find(block_end, a + len(block_start))
+    if b < 0:
+        raise SystemExit(f"{path}: function end anchor not found.")
+    block = text[a:b]
+    count = block.count(old)
+    if count != 1:
+        raise SystemExit(f"{path}: expected one patch anchor inside function, found {count}.")
+    block = block.replace(old, new, 1)
+    path.write_text(text[:a] + block + text[b:], encoding="utf-8")
 
 
 if len(sys.argv) != 2:
@@ -37,7 +53,13 @@ video_cpp = root / "src/gozen_video.cpp"
 
 # The upstream build explicitly disables hardware accelerators and x86 assembly.
 replace_once(build_py, '    "--disable-hwaccels",\n', "")
-replace_once(build_py, '        "--disable-asm",\n', '        "--enable-x86asm",\n')
+replace_once_in_block(
+    build_py,
+    "def compile_ffmpeg_windows(arch: str) -> None:\\n",
+    "\\ndef compile_ffmpeg_macos",
+    '        "--disable-asm",\\n',
+    '        "--enable-x86asm",\\n',
+)
 replace_once(
     build_py,
     '        "--enable-schannel",\n',
@@ -54,7 +76,7 @@ replace_once(
 # Correct FFmpeg's get_format callback signature.
 replace_once(
     ffmpeg_hpp,
-    '    static enum AVPixelFormat get_hw_format(const enum AVPixelFormat* pix_fmt, enum AVPixelFormat* hw_pix_fmt);\n',
+    '\\tstatic enum AVPixelFormat get_hw_format(AVCodecContext* codec_ctx, const enum AVPixelFormat* pix_fmts);\n',
     '    static enum AVPixelFormat get_hw_format(AVCodecContext* codec_ctx, const enum AVPixelFormat* pix_fmts);\n',
 )
 replace_between(

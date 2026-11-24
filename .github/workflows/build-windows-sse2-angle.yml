@@ -52,8 +52,8 @@ jobs:
           unzip -q "$RUNNER_TEMP/godot-angle-static-x86_64-gcc-release.zip" \
             -d godot/bin/build_deps/angle-x86_64-gcc
           echo "ANGLE libraries installed:"
-          find godot/bin/build_deps/angle-x86_64-gcc -maxdepth 2 -type f -printf "%f\\n" | head -40
-          test -n "$(find godot/bin/build_deps/angle-x86_64-gcc -type f \\( -name '*ANGLE*' -o -name '*GLES*' -o -name '*EGL*' \\) -print -quit)"
+          find godot/bin/build_deps/angle-x86_64-gcc -maxdepth 2 -type f | sed 's#^.*/##' | head -40
+          test -n "$(find godot/bin/build_deps/angle-x86_64-gcc -type f -name '*ANGLE*' -print -quit)"
 
       - name: Install SCons
         run: |

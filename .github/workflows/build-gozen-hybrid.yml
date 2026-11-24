@@ -1,0 +1,88 @@
+name: Build GoZen Hybrid Hardware Decode (Windows x64)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-gozen-hybrid.yml"
+      - "scripts/patch_gozen_hybrid.py"
+  push:
+    branches:
+      - gozen-hybrid-hwdecode
+    paths:
+      - ".github/workflows/build-gozen-hybrid.yml"
+      - "scripts/patch_gozen_hybrid.py"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build D3D11VA + DXVA2 GoZen
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout build configuration
+        uses: actions/checkout@v4
+
+      - name: Install Windows cross-compilation toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            git \
+            make \
+            mingw-w64 \
+            nasm \
+            yasm \
+            pkg-config \
+            scons \
+            python3 \
+            zlib1g-dev
+
+      - name: Clone GDE GoZen with its FFmpeg submodules
+        run: |
+          git clone --recurse-submodules --depth 1 \
+            https://github.com/VoylinsGamedevJourney/gde_gozen.git \
+            gde_gozen
+
+      - name: Apply hybrid hardware decode patch
+        run: |
+          python3 scripts/patch_gozen_hybrid.py gde_gozen
+          python3 -m py_compile scripts/patch_gozen_hybrid.py
+
+      - name: Build Windows x64 Release extension
+        shell: bash
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          set -o pipefail
+          cd gde_gozen
+          printf '2\n1\n2\n1\n1\n' | python3 build.py 2>&1 | tee ../gozen-build.log
+
+      - name: Verify generated extension
+        run: |
+          test -s gde_gozen/test_room/addons/gde_gozen/bin/libgozen.windows.template_release.x86_64.dll
+          file gde_gozen/test_room/addons/gde_gozen/bin/libgozen.windows.template_release.x86_64.dll
+          ls -lh gde_gozen/test_room/addons/gde_gozen/bin/libgozen.windows.template_release.x86_64.dll
+
+      - name: Upload GoZen Hybrid DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: GoZen-Hybrid-Windows-x64
+          path: gde_gozen/test_room/addons/gde_gozen/bin/libgozen.windows.template_release.x86_64.dll
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GoZen-Hybrid-Build-Log
+          path: gozen-build.log
+          if-no-files-found: ignore
+          retention-days: 7

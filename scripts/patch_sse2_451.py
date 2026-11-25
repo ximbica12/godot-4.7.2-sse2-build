@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patch Godot 4.5.1 for x86-64-v1, including its Zstd optional ISA path."""
+"""Patch Godot 4.5.1 for an x86-64-v1 baseline and disable Zstd BMI fast paths."""
 
 from pathlib import Path
 import sys
@@ -18,12 +18,12 @@ def write(path: Path, text: str) -> None:
 if len(sys.argv) != 4:
     raise SystemExit(
         "Usage: patch_sse2_451.py GODOT/SConstruct GODOT/platform/windows/SCsub "
-        "GODOT/thirdparty/zstd/common/compiler.h"
+        "GODOT/thirdparty/zstd/common/portability_macros.h"
     )
 
 sconstruct = Path(sys.argv[1])
 scsub = Path(sys.argv[2])
-zstd_compiler = Path(sys.argv[3])
+zstd_portability = Path(sys.argv[3])
 
 # Godot 4.5.1 enables SSE4.2 + POPCNT for x86_64 by default.
 source = read(sconstruct)
@@ -46,7 +46,6 @@ if "-msse4.2" not in old_block or "-mpopcnt" not in old_block:
 
 new_block = '''if env["arch"] == "x86_64":
     # Strict x86-64-v1 baseline: SSE2 is the highest required SIMD ISA.
-    # Do not enable SSE3, SSSE3, SSE4.x, POPCNT, BMI, AES, or AVX.
     if env.msvc and not methods.using_clang(env):
         # MSVC x64 defaults to SSE2; do not enable a higher ISA.
         pass
@@ -81,35 +80,54 @@ new_block = (
 )
 write(scsub, source[:start] + new_block + source[line_start:])
 
-# Zstandard has an optional runtime-dispatched BMI1/BMI2/LZCNT fast path.
-# Its CPUID dispatch is correct, but this compatibility build deliberately
-# compiles that optional path with the generic x86-64-v1 baseline as well.
-# This prevents TZCNT/LZCNT/BMI instructions from appearing in the PE binary.
-zstd_source = read(zstd_compiler)
-old_attribute = '#define BMI2_TARGET_ATTRIBUTE TARGET_ATTRIBUTE("lzcnt,bmi,bmi2")'
-new_attribute = '#define BMI2_TARGET_ATTRIBUTE /* x86-64-v1 build: no BMI1/BMI2/LZCNT codegen. */'
-if zstd_source.count(old_attribute) != 1:
+# Zstd's optional BMI1/BMI2 path is not useful on the target Pentium E5700.
+# Disable both its dynamic BMI2 dispatch and its x86 assembly implementation.
+# This keeps the generic decompression/compression path and prevents BMI opcodes
+# from entering the executable.
+zstd_source = read(zstd_portability)
+zstd_anchor = (
+    "#ifndef ZSTD_PORTABILITY_MACROS_H\n"
+    "#define ZSTD_PORTABILITY_MACROS_H\n"
+)
+if zstd_source.count(zstd_anchor) != 1:
     raise SystemExit(
-        "Zstd compiler.h no longer has the expected BMI2 target attribute; "
+        "Zstd portability_macros.h no longer has the expected include guard; "
         "refusing to patch an unknown Zstd version."
     )
-write(zstd_compiler, zstd_source.replace(old_attribute, new_attribute, 1))
+
+zstd_patch = (
+    zstd_anchor
+    + "\n"
+    + "/* x86-64-v1 compatibility build: keep Zstd on its generic CPU path. */\n"
+    + "#undef DYNAMIC_BMI2\n"
+    + "#define DYNAMIC_BMI2 0\n"
+    + "#undef ZSTD_DISABLE_ASM\n"
+    + "#define ZSTD_DISABLE_ASM 1\n"
+)
+write(zstd_portability, zstd_source.replace(zstd_anchor, zstd_patch, 1))
 
 # Post-patch assertions.
 patched_sconstruct = read(sconstruct)
 patched_scsub = read(scsub)
-patched_zstd = read(zstd_compiler)
-arch_start = patched_sconstruct.find('if env["arch"] == "x86_64":', patched_sconstruct.find(marker))
+patched_zstd = read(zstd_portability)
+
+arch_start = patched_sconstruct.find(
+    'if env["arch"] == "x86_64":', patched_sconstruct.find(marker)
+)
 arch_end = patched_sconstruct.find('elif env["arch"] == "x86_32":', arch_start)
 arch_block = patched_sconstruct[arch_start:arch_end]
 if any(flag in arch_block for flag in ("-msse4.2", "-mpopcnt", "/d2archSSE42")):
     raise SystemExit("Post-patch check failed: a post-SSE2 compiler flag remains.")
+
 if "cpu_feature_validation.c" in patched_scsub or "ShimMainCRTStartup" in patched_scsub:
     raise SystemExit("Post-patch check failed: SSE4.2 startup shim remains.")
-if old_attribute in patched_zstd or new_attribute not in patched_zstd:
-    raise SystemExit("Post-patch check failed: Zstd BMI1/BMI2/LZCNT target attribute remains.")
+
+if "#define DYNAMIC_BMI2 0" not in patched_zstd:
+    raise SystemExit("Post-patch check failed: Zstd dynamic BMI2 path remains enabled.")
+if "#define ZSTD_DISABLE_ASM 1" not in patched_zstd:
+    raise SystemExit("Post-patch check failed: Zstd assembly remains enabled.")
 
 print("Godot 4.5.1 patched successfully.")
 print("CPU baseline: x86-64-v1 (SSE2).")
 print("Windows SSE4.2 startup gate: removed.")
-print("Zstd optional BMI1/BMI2/LZCNT code generation: disabled.")
+print("Zstd dynamic BMI1/BMI2 path and x86 assembly: disabled.")

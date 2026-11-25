@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: godot-451-sse2-${{ github.ref }}
+  group: godot-451-sse2-main
   cancel-in-progress: false
 
 jobs:
@@ -34,6 +34,11 @@ jobs:
           path: godot
           fetch-depth: 1
 
+      - name: Validate build scripts
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/patch_sse2_451.py scripts/audit_x86_64_v1.py
+
       - name: Install MinGW-w64 toolchain
         run: |
           set -euo pipefail
@@ -53,12 +58,12 @@ jobs:
           "$RUNNER_TEMP/scons-venv/bin/python" -m pip install --upgrade pip
           "$RUNNER_TEMP/scons-venv/bin/python" -m pip install "scons==4.10.1"
 
-      - name: Patch Godot 4.5.1 for strict SSE2 baseline
+      - name: Patch Godot 4.5.1 for SSE2 baseline
         run: |
           set -euo pipefail
-          python3 scripts/patch_sse2_451.py godot/SConstruct godot/platform/windows/SCsub godot/thirdparty/zstd/common/compiler.h
+          python3 scripts/patch_sse2_451.py godot/SConstruct godot/platform/windows/SCsub godot/thirdparty/zstd/common/portability_macros.h
           git -C godot diff --check
-          git -C godot diff -- SConstruct platform/windows/SCsub thirdparty/zstd/common/compiler.h | tee "$RUNNER_TEMP/godot-sse2.patch"
+          git -C godot diff -- SConstruct platform/windows/SCsub thirdparty/zstd/common/portability_macros.h | tee "$RUNNER_TEMP/godot-sse2.patch"
 
       - name: Build Windows x64 release runtime
         env:
@@ -89,11 +94,22 @@ jobs:
           mkdir -p dist
           x86_64-w64-mingw32-objdump -f "$exe" | tee dist/PE_INFO.txt
           grep -q "pei-x86-64" dist/PE_INFO.txt
-          python3 scripts/audit_x86_64_v1.py "$exe" | tee dist/ISA_AUDIT.txt
+          python3 scripts/audit_x86_64_v1.py "$exe" --source godot --objects godot/bin/obj | tee dist/ISA_AUDIT.txt
           if strings "$exe" | grep -Fq "A CPU with SSE4.2 instruction set support is required."; then
             echo "SSE4.2 startup gate unexpectedly remains in the binary."
             exit 1
           fi
+
+      - name: Upload ISA audit diagnostics
+        if: always() && hashFiles('dist/ISA_AUDIT.txt') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: Godot-4.5.1-ISA-Audit-Diagnostics
+          path: |
+            dist/PE_INFO.txt
+            dist/ISA_AUDIT.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Package runtime and reproducibility information
         run: |
@@ -107,7 +123,8 @@ jobs:
             echo "CPU baseline: x86-64-v1 (SSE2)"
             echo "Compiler flags: -march=x86-64 -mtune=generic"
             echo "Windows SSE4.2 startup shim: removed"
-            echo "Zstd optional BMI1/BMI2/LZCNT code generation: disabled"
+            echo "Zstd dynamic BMI1/BMI2 path and x86 assembly: disabled"
+            echo "Mbed TLS AES-NI/PCLMUL: retained only behind CPUID dispatch"
             echo "Vulkan: enabled"
             echo "OpenGL 3: enabled"
             echo "D3D12: disabled"

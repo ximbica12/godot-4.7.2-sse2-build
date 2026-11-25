@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Patch the official Godot 4.5.1 source for a strict x86-64-v1 (SSE2) build."""
+"""Patch Godot 4.5.1 for x86-64-v1, including its Zstd optional ISA path."""
 
 from pathlib import Path
 import sys
@@ -15,13 +15,15 @@ def write(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", newline="\n")
 
 
-if len(sys.argv) != 3:
+if len(sys.argv) != 4:
     raise SystemExit(
-        "Usage: patch_sse2_451.py GODOT/SConstruct GODOT/platform/windows/SCsub"
+        "Usage: patch_sse2_451.py GODOT/SConstruct GODOT/platform/windows/SCsub "
+        "GODOT/thirdparty/zstd/common/compiler.h"
     )
 
 sconstruct = Path(sys.argv[1])
 scsub = Path(sys.argv[2])
+zstd_compiler = Path(sys.argv[3])
 
 # Godot 4.5.1 enables SSE4.2 + POPCNT for x86_64 by default.
 source = read(sconstruct)
@@ -79,9 +81,24 @@ new_block = (
 )
 write(scsub, source[:start] + new_block + source[line_start:])
 
+# Zstandard has an optional runtime-dispatched BMI1/BMI2/LZCNT fast path.
+# Its CPUID dispatch is correct, but this compatibility build deliberately
+# compiles that optional path with the generic x86-64-v1 baseline as well.
+# This prevents TZCNT/LZCNT/BMI instructions from appearing in the PE binary.
+zstd_source = read(zstd_compiler)
+old_attribute = '#define BMI2_TARGET_ATTRIBUTE TARGET_ATTRIBUTE("lzcnt,bmi,bmi2")'
+new_attribute = '#define BMI2_TARGET_ATTRIBUTE /* x86-64-v1 build: no BMI1/BMI2/LZCNT codegen. */'
+if zstd_source.count(old_attribute) != 1:
+    raise SystemExit(
+        "Zstd compiler.h no longer has the expected BMI2 target attribute; "
+        "refusing to patch an unknown Zstd version."
+    )
+write(zstd_compiler, zstd_source.replace(old_attribute, new_attribute, 1))
+
 # Post-patch assertions.
 patched_sconstruct = read(sconstruct)
 patched_scsub = read(scsub)
+patched_zstd = read(zstd_compiler)
 arch_start = patched_sconstruct.find('if env["arch"] == "x86_64":', patched_sconstruct.find(marker))
 arch_end = patched_sconstruct.find('elif env["arch"] == "x86_32":', arch_start)
 arch_block = patched_sconstruct[arch_start:arch_end]
@@ -89,7 +106,10 @@ if any(flag in arch_block for flag in ("-msse4.2", "-mpopcnt", "/d2archSSE42")):
     raise SystemExit("Post-patch check failed: a post-SSE2 compiler flag remains.")
 if "cpu_feature_validation.c" in patched_scsub or "ShimMainCRTStartup" in patched_scsub:
     raise SystemExit("Post-patch check failed: SSE4.2 startup shim remains.")
+if old_attribute in patched_zstd or new_attribute not in patched_zstd:
+    raise SystemExit("Post-patch check failed: Zstd BMI1/BMI2/LZCNT target attribute remains.")
 
 print("Godot 4.5.1 patched successfully.")
 print("CPU baseline: x86-64-v1 (SSE2).")
 print("Windows SSE4.2 startup gate: removed.")
+print("Zstd optional BMI1/BMI2/LZCNT code generation: disabled.")

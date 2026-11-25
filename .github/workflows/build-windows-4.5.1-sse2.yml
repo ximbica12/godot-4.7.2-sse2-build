@@ -1,4 +1,5 @@
 name: Build Godot 4.5.1 Windows x64 SSE2
+# Audit revision: source-level CPUID guards plus per-object ISA verification.
 
 on:
   workflow_dispatch:

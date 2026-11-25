@@ -74,8 +74,8 @@ if "cpu_feature_validation.c" not in old_block or "ShimMainCRTStartup" not in ol
     )
 
 new_block = (
-    "# SSE2 build: omit cpu_feature_validation.c and ShimMainCRTStartup.\n"
-    "# The upstream shim rejects CPUs without SSE4.2 before Godot starts.\n\n"
+    "# SSE2 build: use the normal Windows CRT startup path.\n"
+    "# The compiler target remains the x86-64-v1 baseline.\n\n"
 )
 write(scsub, source[:start] + new_block + source[line_start:])
 

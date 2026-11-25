@@ -46,7 +46,7 @@ new_block = '''if env["arch"] == "x86_64":
     # Strict x86-64-v1 baseline: SSE2 is the highest required SIMD ISA.
     # Do not enable SSE3, SSSE3, SSE4.x, POPCNT, BMI, AES, or AVX.
     if env.msvc and not methods.using_clang(env):
-        # MSVC x64 defaults to SSE2; do not add /d2archSSE42.
+        # MSVC x64 defaults to SSE2; do not enable a higher ISA.
         pass
     else:
         env.Append(CCFLAGS=["-march=x86-64", "-mtune=generic"])

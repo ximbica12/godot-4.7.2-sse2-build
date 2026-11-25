@@ -1,0 +1,187 @@
+name: Build Godot 4.5.1 Windows x64 SSE2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-windows-4.5.1-sse2.yml"
+      - "scripts/patch_sse2_451.py"
+      - "scripts/audit_x86_64_v1.py"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: godot-451-sse2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: MinGW-w64 x86-64-v1 runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout build configuration
+        uses: actions/checkout@v4
+
+      - name: Checkout official Godot 4.5.1 source
+        uses: actions/checkout@v4
+        with:
+          repository: godotengine/godot
+          ref: 4.5.1-stable
+          path: godot
+          fetch-depth: 1
+
+      - name: Install MinGW-w64 toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            binutils-mingw-w64-x86-64 \
+            gcc-mingw-w64-x86-64-posix \
+            g++-mingw-w64-x86-64-posix \
+            python3 \
+            python3-venv
+
+      - name: Install pinned SCons
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/scons-venv"
+          "$RUNNER_TEMP/scons-venv/bin/python" -m pip install --upgrade pip
+          "$RUNNER_TEMP/scons-venv/bin/python" -m pip install "scons==4.10.1"
+
+      - name: Patch Godot 4.5.1 for strict SSE2 baseline
+        run: |
+          set -euo pipefail
+          python3 scripts/patch_sse2_451.py godot/SConstruct godot/platform/windows/SCsub
+          git -C godot diff --check
+          git -C godot diff -- SConstruct platform/windows/SCsub | tee "$RUNNER_TEMP/godot-sse2.patch"
+
+      - name: Build Windows x64 release runtime
+        env:
+          MINGW_PREFIX: /usr
+        run: |
+          set -euo pipefail
+          cd godot
+          "$RUNNER_TEMP/scons-venv/bin/scons" -j2 \
+            platform=windows \
+            arch=x86_64 \
+            target=template_release \
+            use_mingw=yes \
+            use_llvm=no \
+            use_static_cpp=yes \
+            production=yes \
+            lto=none \
+            optimize=speed \
+            accesskit=no \
+            d3d12=no \
+            vulkan=yes \
+            opengl3=yes
+
+      - name: Verify PE architecture and audit instruction set
+        run: |
+          set -euo pipefail
+          exe="godot/bin/godot.windows.template_release.x86_64.exe"
+          test -s "$exe"
+          mkdir -p dist
+          x86_64-w64-mingw32-objdump -f "$exe" | tee dist/PE_INFO.txt
+          grep -q "pei-x86-64" dist/PE_INFO.txt
+          python3 scripts/audit_x86_64_v1.py "$exe" | tee dist/ISA_AUDIT.txt
+          if strings "$exe" | grep -Fq "A CPU with SSE4.2 instruction set support is required."; then
+            echo "SSE4.2 startup gate unexpectedly remains in the binary."
+            exit 1
+          fi
+
+      - name: Package runtime and reproducibility information
+        run: |
+          set -euo pipefail
+          cp godot/bin/godot.windows.template_release.x86_64.exe \
+            dist/Godot_v4.5.1-stable_windows_x86_64_SSE2.exe
+          {
+            echo "Godot tag: 4.5.1-stable"
+            echo "Godot source commit: $(git -C godot rev-parse HEAD)"
+            echo "Target: Windows x86_64 template_release"
+            echo "CPU baseline: x86-64-v1 (SSE2)"
+            echo "Compiler flags: -march=x86-64 -mtune=generic"
+            echo "Windows SSE4.2 startup shim: removed"
+            echo "Vulkan: enabled"
+            echo "OpenGL 3: enabled"
+            echo "D3D12: disabled"
+            echo "LTO: none"
+            echo "C++ runtime: statically linked"
+            echo "Compiler:"
+            x86_64-w64-mingw32-g++ --version | head -n 1
+            echo "SCons:"
+            "$RUNNER_TEMP/scons-venv/bin/scons" --version | head -n 1
+          } > dist/BUILD_INFO.txt
+          cp "$RUNNER_TEMP/godot-sse2.patch" dist/SOURCE_PATCH.diff
+
+      - name: Upload build candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: Godot-4.5.1-Windows-x64-SSE2-CANDIDATE
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-smoke:
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Download build candidate
+        uses: actions/download-artifact@v4
+        with:
+          name: Godot-4.5.1-Windows-x64-SSE2-CANDIDATE
+          path: dist
+
+      - name: Verify version and release command-line options
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $engine = (Resolve-Path 'dist/Godot_v4.5.1-stable_windows_x86_64_SSE2.exe').Path
+          $version = & $engine --version 2>&1 | Out-String
+          Write-Host $version
+          if ($version -notmatch '4\.5\.1') { throw "Unexpected engine version: $version" }
+          $help = & $engine --help 2>&1 | Out-String
+          if ($help -notmatch '--main-pack') { throw 'Release binary does not expose --main-pack.' }
+          if ($help -notmatch '--audio-output-latency') { throw 'Release binary does not expose audio latency option.' }
+          if ($help -notmatch '--max-fps') { throw 'Release binary does not expose FPS limit option.' }
+
+      - name: Run a minimal headless project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $engine = (Resolve-Path 'dist/Godot_v4.5.1-stable_windows_x86_64_SSE2.exe').Path
+          New-Item -ItemType Directory -Force smoke | Out-Null
+          @'
+          config_version=5
+          [application]
+          config/name="Godot 4.5.1 SSE2 smoke test"
+          run/main_scene="res://main.tscn"
+          [rendering]
+          renderer/rendering_method="gl_compatibility"
+          '@ | Set-Content smoke/project.godot -Encoding utf8
+          @'
+          [gd_scene format=3]
+          [node name="Main" type="Node"]
+          '@ | Set-Content smoke/main.tscn -Encoding utf8
+          $log = Join-Path $PWD 'dist/smoke-test.log'
+          & $engine --headless --path (Join-Path $PWD 'smoke') --quit-after 3 --log-file $log
+          if ($LASTEXITCODE -ne 0) { throw "Headless smoke test failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path $log)) { throw 'Godot did not create its smoke-test log.' }
+          Get-Content $log
+          if (-not (Select-String -Path $log -Pattern 'Godot Engine v4\.5\.1' -Quiet)) {
+            throw 'Smoke-test log does not identify Godot 4.5.1.'
+          }
+
+      - name: Upload smoke-tested SSE2 runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: Godot-4.5.1-Windows-x64-SSE2
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30

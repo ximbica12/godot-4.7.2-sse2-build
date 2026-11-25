@@ -76,6 +76,9 @@ for line in result.stdout.splitlines():
     mnemonic = match.group(1).lower()
     if mnemonic in {"verr", "verw"}:
         continue
+    # PEXTRW is part of SSE2 (not SSE4.1); keep it legal in x86-64-v1.
+    if mnemonic == "pextrw":
+        continue
     if mnemonic in forbidden_exact or mnemonic.startswith(forbidden_prefixes):
         violations.append((mnemonic, line.strip()))
 

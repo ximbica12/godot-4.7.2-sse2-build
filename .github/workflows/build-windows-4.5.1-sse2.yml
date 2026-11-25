@@ -56,9 +56,9 @@ jobs:
       - name: Patch Godot 4.5.1 for strict SSE2 baseline
         run: |
           set -euo pipefail
-          python3 scripts/patch_sse2_451.py godot/SConstruct godot/platform/windows/SCsub
+          python3 scripts/patch_sse2_451.py godot/SConstruct godot/platform/windows/SCsub godot/thirdparty/zstd/common/compiler.h
           git -C godot diff --check
-          git -C godot diff -- SConstruct platform/windows/SCsub | tee "$RUNNER_TEMP/godot-sse2.patch"
+          git -C godot diff -- SConstruct platform/windows/SCsub thirdparty/zstd/common/compiler.h | tee "$RUNNER_TEMP/godot-sse2.patch"
 
       - name: Build Windows x64 release runtime
         env:
@@ -107,6 +107,7 @@ jobs:
             echo "CPU baseline: x86-64-v1 (SSE2)"
             echo "Compiler flags: -march=x86-64 -mtune=generic"
             echo "Windows SSE4.2 startup shim: removed"
+            echo "Zstd optional BMI1/BMI2/LZCNT code generation: disabled"
             echo "Vulkan: enabled"
             echo "OpenGL 3: enabled"
             echo "D3D12: disabled"

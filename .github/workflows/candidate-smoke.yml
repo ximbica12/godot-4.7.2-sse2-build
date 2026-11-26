@@ -1,0 +1,79 @@
+name: Smoke test existing Godot 4.5.1 SSE2 candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/candidate-smoke.yml"
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  windows-smoke:
+    name: Test existing candidate (no rebuild)
+    runs-on: windows-2022
+    timeout-minutes: 15
+
+    steps:
+      - name: Download candidate from previous build
+        uses: actions/download-artifact@v4
+        with:
+          name: Godot-4.5.1-Windows-x64-SSE2-CANDIDATE
+          run-id: 45835835435
+          github-token: ${{ github.token }}
+          path: dist
+
+      - name: Verify executable and Godot version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $engine = (Resolve-Path 'dist/Godot_v4.5.1-stable_windows_x86_64_SSE2.exe').Path
+          if ((Get-Item $engine).Length -lt 10MB) { throw 'Candidate executable is unexpectedly small.' }
+          $version = & $engine --version 2>&1 | Out-String
+          Write-Host $version
+          if ($LASTEXITCODE -ne 0) { throw "Godot --version failed with exit code $LASTEXITCODE" }
+          if ($version -notmatch '4\.5\.1') { throw "Unexpected engine version: $version" }
+          $help = & $engine --help 2>&1 | Out-String
+          if ($help -notmatch '--main-pack') { throw 'Release binary does not expose --main-pack.' }
+          if ($help -notmatch '--audio-output-latency') { throw 'Release binary does not expose audio latency option.' }
+          if ($help -notmatch '--max-fps') { throw 'Release binary does not expose FPS limit option.' }
+          Get-FileHash $engine -Algorithm SHA256 | Format-List
+
+      - name: Run a minimal headless project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $engine = (Resolve-Path 'dist/Godot_v4.5.1-stable_windows_x86_64_SSE2.exe').Path
+          New-Item -ItemType Directory -Force smoke | Out-Null
+          @'
+          config_version=5
+          [application]
+          config/name="Godot 4.5.1 SSE2 candidate smoke test"
+          run/main_scene="res://main.tscn"
+          [rendering]
+          renderer/rendering_method="gl_compatibility"
+          '@ | Set-Content smoke/project.godot -Encoding utf8
+          @'
+          [gd_scene format=3]
+          [node name="Main" type="Node"]
+          '@ | Set-Content smoke/main.tscn -Encoding utf8
+          $log = Join-Path $PWD 'dist/smoke-test.log'
+          & $engine --headless --path (Join-Path $PWD 'smoke') --quit-after 3 --log-file $log
+          if ($LASTEXITCODE -ne 0) { throw "Headless smoke test failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path $log)) { throw 'Godot did not create its smoke-test log.' }
+          Get-Content $log
+          if (-not (Select-String -Path $log -Pattern 'Godot Engine v4\.5\.1' -Quiet)) {
+            throw 'Smoke-test log does not identify Godot 4.5.1.'
+          }
+
+      - name: Upload smoke-test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Godot-4.5.1-SSE2-CANDIDATE-SMOKE-REPORT
+          path: dist/
+          if-no-files-found: warn
+          retention-days: 14

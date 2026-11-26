@@ -1,0 +1,55 @@
+name: Fast SSE2 compatibility preflight
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/audit_x86_64_v1.py"
+      - "scripts/test_audit_x86_64_v1.py"
+      - "scripts/patch_sse2_451.py"
+      - ".github/workflows/preflight.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Tests and source guards (no engine build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout build configuration
+        uses: actions/checkout@v4
+
+      - name: Checkout official Godot 4.5.1 source
+        uses: actions/checkout@v4
+        with:
+          repository: godotengine/godot
+          ref: 4.5.1-stable
+          path: godot
+          fetch-depth: 1
+
+      - name: Compile Python scripts and run regression tests
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/patch_sse2_451.py scripts/audit_x86_64_v1.py scripts/test_audit_x86_64_v1.py
+          python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
+      - name: Download pinned GCC 13.2 libstdc++ random source
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-13.2.0/libstdc++-v3/src/c++11/random.cc -o "$RUNNER_TEMP/gcc-random.cc"
+          test -s "$RUNNER_TEMP/gcc-random.cc"
+
+      - name: Patch source tree without compiling the engine
+        run: |
+          set -euo pipefail
+          python3 scripts/patch_sse2_451.py godot/SConstruct godot/platform/windows/SCsub godot/thirdparty/zstd/common/portability_macros.h
+          git -C godot diff --check
+
+      - name: Verify all CPU-dispatch source guards
+        run: |
+          set -euo pipefail
+          python3 scripts/audit_x86_64_v1.py --source godot --gcc-random-source "$RUNNER_TEMP/gcc-random.cc" --source-only

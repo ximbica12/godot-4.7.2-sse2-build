@@ -2,13 +2,6 @@ name: Build Godot 4.5.1 Windows x64 SSE2
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/build-windows-4.5.1-sse2.yml"
-      - "scripts/patch_sse2_451.py"
-      - "scripts/audit_x86_64_v1.py"
-      - "scripts/test_audit_x86_64_v1.py"
 
 permissions:
   contents: read
@@ -51,6 +44,7 @@ jobs:
             gcc-mingw-w64-x86-64-posix \
             g++-mingw-w64-x86-64-posix \
             ccache \
+            curl \
             python3 \
             python3-venv
 
@@ -62,29 +56,34 @@ jobs:
           restore-keys: |
             godot-4.5.1-mingw-x86_64-${{ runner.os }}-
 
-      - name: Configure ccache compiler launchers
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/.ccache
+      - name: Configure and verify ccache before the engine build
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/ccache-wrappers"
-          cat > "$RUNNER_TEMP/ccache-wrappers/x86_64-w64-mingw32-gcc" <<'EOF'
-          #!/usr/bin/env bash
-          for arg in "$@"; do
-            case "$arg" in
-              *.S|*.s) exec /usr/bin/x86_64-w64-mingw32-gcc "$@" ;;
-            esac
-          done
-          exec ccache /usr/bin/x86_64-w64-mingw32-gcc "$@"
-          EOF
-          cat > "$RUNNER_TEMP/ccache-wrappers/x86_64-w64-mingw32-g++" <<'EOF'
-          #!/usr/bin/env bash
-          exec ccache /usr/bin/x86_64-w64-mingw32-g++ "$@"
-          EOF
-          chmod +x "$RUNNER_TEMP/ccache-wrappers/"*
-          echo "$RUNNER_TEMP/ccache-wrappers" >> "$GITHUB_PATH"
+          export CCACHE_DIR="$GITHUB_WORKSPACE/.ccache"
           ccache --max-size=3G
+          ccache --zero-stats
+          cat > "$RUNNER_TEMP/ccache-probe.cpp" <<'EOF'
+          int main() { return 0; }
+          EOF
+          ccache x86_64-w64-mingw32-g++ -march=x86-64 -mtune=generic -c "$RUNNER_TEMP/ccache-probe.cpp" -o "$RUNNER_TEMP/ccache-probe.o"
+          ccache x86_64-w64-mingw32-g++ -march=x86-64 -mtune=generic -c "$RUNNER_TEMP/ccache-probe.cpp" -o "$RUNNER_TEMP/ccache-probe.o"
+          ccache --show-stats | tee "$RUNNER_TEMP/ccache-probe-stats.txt"
+          grep -Eq 'Hits:[[:space:]]+[1-9]' "$RUNNER_TEMP/ccache-probe-stats.txt"
+          ccache --zero-stats
           ccache --show-config
+
+      - name: Verify pinned MinGW GCC version
+        run: |
+          set -euo pipefail
+          gcc_version="$(x86_64-w64-mingw32-g++ -dumpfullversion -dumpversion)"
+          echo "MinGW GCC version: $gcc_version"
+          test "$gcc_version" = "13.2.0"
+
+      - name: Download pinned GCC 13.2 libstdc++ random source
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/gcc-mirror/gcc/releases/gcc-13.2.0/libstdc++-v3/src/c++11/random.cc -o "$RUNNER_TEMP/gcc-random.cc"
+          test -s "$RUNNER_TEMP/gcc-random.cc"
 
       - name: Verify compiler feature baseline before full build
         run: |
@@ -118,6 +117,11 @@ jobs:
           git -C godot diff --check
           git -C godot diff -- SConstruct platform/windows/SCsub thirdparty/zstd/common/portability_macros.h | tee "$RUNNER_TEMP/godot-sse2.patch"
 
+      - name: Run source-guard preflight before full build
+        run: |
+          set -euo pipefail
+          python3 scripts/audit_x86_64_v1.py --source godot --gcc-random-source "$RUNNER_TEMP/gcc-random.cc" --source-only
+
       - name: Build Windows x64 release runtime
         id: build
         env:
@@ -144,8 +148,11 @@ jobs:
             accesskit=no \
             d3d12=no \
             vulkan=yes \
-            opengl3=yes
+            opengl3=yes \
+            c_compiler_launcher=ccache \
+            cpp_compiler_launcher=ccache
           ccache --show-stats | tee ../dist/CCACHE_STATS.txt
+          grep -Eq 'Cacheable calls:[[:space:]]+[1-9]' ../dist/CCACHE_STATS.txt
 
       - name: Verify PE architecture and SSE4.2 startup gate
         id: pe_check
@@ -172,7 +179,8 @@ jobs:
           python3 scripts/audit_x86_64_v1.py \
             godot/bin/godot.windows.template_release.x86_64.exe \
             --source godot \
-            --objects godot/bin/obj 2>&1 | tee dist/ISA_AUDIT.txt
+            --objects godot/bin/obj \
+            --gcc-random-source "$RUNNER_TEMP/gcc-random.cc" 2>&1 | tee dist/ISA_AUDIT.txt
           audit_status=${PIPESTATUS[0]}
           set -e
           if [[ "$audit_status" -eq 0 ]]; then
@@ -204,6 +212,9 @@ jobs:
             echo "Zstd dynamic BMI1/BMI2 path and x86 assembly: disabled"
             echo "Mbed TLS AES-NI/PCLMUL: retained only behind CPUID dispatch"
             echo "HarfBuzz TZCNT encoding: accepted only as zero-guarded generic BSF alias"
+            echo "meshoptimizer SSSE3: accepted only behind CPUID dispatch and scalar fallback"
+            echo "XGETBV: accepted only behind OSXSAVE checks"
+            echo "GCC libstdc++ RDRAND/RDSEED: accepted only behind CPUID checks"
             echo "ISA audit passed: ${{ steps.isa_audit.outputs.passed }}"
             echo "Vulkan: enabled"
             echo "OpenGL 3: enabled"
@@ -212,6 +223,8 @@ jobs:
             echo "C++ runtime: statically linked"
             echo "Compiler:"
             x86_64-w64-mingw32-g++ --version | head -n 1
+            echo "Compiler full version:"
+            x86_64-w64-mingw32-g++ -dumpfullversion -dumpversion
             echo "SCons:"
             "$RUNNER_TEMP/scons-venv/bin/scons" --version | head -n 1
           } > dist/BUILD_INFO.txt

@@ -1,5 +1,4 @@
 name: Build Godot 4.5.1 Windows x64 SSE2
-# Audit revision: source-level CPUID guards plus per-object ISA verification.
 
 on:
   workflow_dispatch:
@@ -9,6 +8,7 @@ on:
       - ".github/workflows/build-windows-4.5.1-sse2.yml"
       - "scripts/patch_sse2_451.py"
       - "scripts/audit_x86_64_v1.py"
+      - "scripts/test_audit_x86_64_v1.py"
 
 permissions:
   contents: read
@@ -35,12 +35,13 @@ jobs:
           path: godot
           fetch-depth: 1
 
-      - name: Validate build scripts
+      - name: Validate scripts and audit regression tests
         run: |
           set -euo pipefail
-          python3 -m py_compile scripts/patch_sse2_451.py scripts/audit_x86_64_v1.py
+          python3 -m py_compile scripts/patch_sse2_451.py scripts/audit_x86_64_v1.py scripts/test_audit_x86_64_v1.py
+          python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
-      - name: Install MinGW-w64 toolchain
+      - name: Install MinGW-w64 toolchain and ccache
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -49,8 +50,59 @@ jobs:
             binutils-mingw-w64-x86-64 \
             gcc-mingw-w64-x86-64-posix \
             g++-mingw-w64-x86-64-posix \
+            ccache \
             python3 \
             python3-venv
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: godot-4.5.1-mingw-x86_64-${{ runner.os }}-${{ hashFiles('scripts/patch_sse2_451.py') }}
+          restore-keys: |
+            godot-4.5.1-mingw-x86_64-${{ runner.os }}-
+
+      - name: Configure ccache compiler launchers
+        env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ccache-wrappers"
+          cat > "$RUNNER_TEMP/ccache-wrappers/x86_64-w64-mingw32-gcc" <<'EOF'
+          #!/usr/bin/env bash
+          for arg in "$@"; do
+            case "$arg" in
+              *.S|*.s) exec /usr/bin/x86_64-w64-mingw32-gcc "$@" ;;
+            esac
+          done
+          exec ccache /usr/bin/x86_64-w64-mingw32-gcc "$@"
+          EOF
+          cat > "$RUNNER_TEMP/ccache-wrappers/x86_64-w64-mingw32-g++" <<'EOF'
+          #!/usr/bin/env bash
+          exec ccache /usr/bin/x86_64-w64-mingw32-g++ "$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/ccache-wrappers/"*
+          echo "$RUNNER_TEMP/ccache-wrappers" >> "$GITHUB_PATH"
+          ccache --max-size=3G
+          ccache --show-config
+
+      - name: Verify compiler feature baseline before full build
+        run: |
+          set -euo pipefail
+          /usr/bin/x86_64-w64-mingw32-gcc -Q --help=target \
+            -march=x86-64 -mtune=generic \
+            -mno-bmi -mno-bmi2 -mno-lzcnt -mno-popcnt \
+            > "$RUNNER_TEMP/x86-target-features.txt"
+          python3 - "$RUNNER_TEMP/x86-target-features.txt" <<'PY'
+          import re
+          import sys
+          text = open(sys.argv[1], encoding="utf-8").read()
+          for option in ("-mbmi", "-mbmi2", "-mlzcnt", "-mpopcnt"):
+              match = re.search(r"^\s*" + re.escape(option) + r"\s+\[(enabled|disabled)\]", text, re.M)
+              if not match or match.group(1) != "disabled":
+                  raise SystemExit(f"Compiler did not confirm {option} disabled.")
+              print(f"PASS: {option} disabled")
+          PY
 
       - name: Install pinned SCons
         run: |
@@ -67,10 +119,17 @@ jobs:
           git -C godot diff -- SConstruct platform/windows/SCsub thirdparty/zstd/common/portability_macros.h | tee "$RUNNER_TEMP/godot-sse2.patch"
 
       - name: Build Windows x64 release runtime
+        id: build
         env:
-          MINGW_PREFIX: /usr
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_COMPILERCHECK: content
+          CCACHE_MAXSIZE: 3G
         run: |
           set -euo pipefail
+          unset MINGW_PREFIX
+          ccache --zero-stats
+          mkdir -p dist
           cd godot
           "$RUNNER_TEMP/scons-venv/bin/scons" -j2 \
             platform=windows \
@@ -86,8 +145,11 @@ jobs:
             d3d12=no \
             vulkan=yes \
             opengl3=yes
+          ccache --show-stats | tee ../dist/CCACHE_STATS.txt
 
-      - name: Verify PE architecture and audit instruction set
+      - name: Verify PE architecture and SSE4.2 startup gate
+        id: pe_check
+        if: always() && steps.build.outcome == 'success'
         run: |
           set -euo pipefail
           exe="godot/bin/godot.windows.template_release.x86_64.exe"
@@ -95,37 +157,54 @@ jobs:
           mkdir -p dist
           x86_64-w64-mingw32-objdump -f "$exe" | tee dist/PE_INFO.txt
           grep -q "pei-x86-64" dist/PE_INFO.txt
-          python3 scripts/audit_x86_64_v1.py "$exe" --source godot --objects godot/bin/obj | tee dist/ISA_AUDIT.txt
           if strings "$exe" | grep -Fq "A CPU with SSE4.2 instruction set support is required."; then
             echo "SSE4.2 startup gate unexpectedly remains in the binary."
             exit 1
           fi
 
-      - name: Upload ISA audit diagnostics
-        if: always() && hashFiles('dist/ISA_AUDIT.txt') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: Godot-4.5.1-ISA-Audit-Diagnostics
-          path: |
-            dist/PE_INFO.txt
-            dist/ISA_AUDIT.txt
-          if-no-files-found: ignore
-          retention-days: 7
+      - name: Audit object files and final executable
+        id: isa_audit
+        if: always() && steps.build.outcome == 'success' && steps.pe_check.outcome == 'success'
+        run: |
+          set -uo pipefail
+          mkdir -p dist
+          set +e
+          python3 scripts/audit_x86_64_v1.py \
+            godot/bin/godot.windows.template_release.x86_64.exe \
+            --source godot \
+            --objects godot/bin/obj 2>&1 | tee dist/ISA_AUDIT.txt
+          audit_status=${PIPESTATUS[0]}
+          set -e
+          if [[ "$audit_status" -eq 0 ]]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+            echo "ISA audit passed."
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+            echo "ISA audit failed with exit code $audit_status; candidate will be retained for diagnosis."
+          fi
 
-      - name: Package runtime and reproducibility information
+      - name: Package build candidate and diagnostics
+        id: package_candidate
+        if: always() && steps.build.outcome == 'success'
         run: |
           set -euo pipefail
-          cp godot/bin/godot.windows.template_release.x86_64.exe \
-            dist/Godot_v4.5.1-stable_windows_x86_64_SSE2.exe
+          exe="godot/bin/godot.windows.template_release.x86_64.exe"
+          test -s "$exe"
+          mkdir -p dist
+          cp "$exe" dist/Godot_v4.5.1-stable_windows_x86_64_SSE2.exe
+          test -f dist/PE_INFO.txt || echo "PE verification did not complete." > dist/PE_INFO.txt
+          test -f dist/ISA_AUDIT.txt || echo "ISA audit did not run." > dist/ISA_AUDIT.txt
           {
             echo "Godot tag: 4.5.1-stable"
             echo "Godot source commit: $(git -C godot rev-parse HEAD)"
             echo "Target: Windows x86_64 template_release"
             echo "CPU baseline: x86-64-v1 (SSE2)"
-            echo "Compiler flags: -march=x86-64 -mtune=generic"
+            echo "Compiler flags: -march=x86-64 -mtune=generic -mno-bmi -mno-bmi2 -mno-lzcnt -mno-popcnt"
             echo "Windows SSE4.2 startup shim: removed"
             echo "Zstd dynamic BMI1/BMI2 path and x86 assembly: disabled"
             echo "Mbed TLS AES-NI/PCLMUL: retained only behind CPUID dispatch"
+            echo "HarfBuzz TZCNT encoding: accepted only as zero-guarded generic BSF alias"
+            echo "ISA audit passed: ${{ steps.isa_audit.outputs.passed }}"
             echo "Vulkan: enabled"
             echo "OpenGL 3: enabled"
             echo "D3D12: disabled"
@@ -138,13 +217,32 @@ jobs:
           } > dist/BUILD_INFO.txt
           cp "$RUNNER_TEMP/godot-sse2.patch" dist/SOURCE_PATCH.diff
 
-      - name: Upload build candidate
+      - name: Upload candidate for review (not yet the final release)
+        id: upload_candidate
+        if: always() && steps.package_candidate.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: Godot-4.5.1-Windows-x64-SSE2-CANDIDATE
           path: dist/
           if-no-files-found: error
           retention-days: 7
+
+      - name: Enforce validation gate
+        if: always() && steps.build.outcome == 'success'
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.pe_check.outcome }}" != "success" ]]; then
+            echo "PE architecture/startup validation failed."
+            exit 1
+          fi
+          if [[ "${{ steps.isa_audit.outputs.passed }}" != "true" ]]; then
+            echo "ISA audit did not pass. Candidate artifact was retained for diagnosis."
+            exit 1
+          fi
+          if [[ "${{ steps.upload_candidate.outcome }}" != "success" ]]; then
+            echo "Candidate artifact upload failed."
+            exit 1
+          fi
 
   windows-smoke:
     needs: build

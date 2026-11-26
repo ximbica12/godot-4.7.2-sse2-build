@@ -50,7 +50,14 @@ new_block = '''if env["arch"] == "x86_64":
         # MSVC x64 defaults to SSE2; do not enable a higher ISA.
         pass
     else:
-        env.Append(CCFLAGS=["-march=x86-64", "-mtune=generic"])
+        env.Append(CCFLAGS=[
+            "-march=x86-64",
+            "-mtune=generic",
+            "-mno-bmi",
+            "-mno-bmi2",
+            "-mno-lzcnt",
+            "-mno-popcnt",
+        ])
 '''
 write(sconstruct, source[:start] + new_block + source[end:])
 
@@ -82,8 +89,6 @@ write(scsub, source[:start] + new_block + source[line_start:])
 
 # Zstd's optional BMI1/BMI2 path is not useful on the target Pentium E5700.
 # Disable both its dynamic BMI2 dispatch and its x86 assembly implementation.
-# This keeps the generic decompression/compression path and prevents BMI opcodes
-# from entering the executable.
 zstd_source = read(zstd_portability)
 zstd_anchor = (
     "#ifndef ZSTD_PORTABILITY_MACROS_H\n"
@@ -116,6 +121,19 @@ arch_start = patched_sconstruct.find(
 )
 arch_end = patched_sconstruct.find('elif env["arch"] == "x86_32":', arch_start)
 arch_block = patched_sconstruct[arch_start:arch_end]
+
+required_flags = (
+    "-march=x86-64",
+    "-mtune=generic",
+    "-mno-bmi",
+    "-mno-bmi2",
+    "-mno-lzcnt",
+    "-mno-popcnt",
+)
+missing_flags = [flag for flag in required_flags if flag not in arch_block]
+if missing_flags:
+    raise SystemExit("Post-patch check failed: missing flags " + ", ".join(missing_flags))
+
 if any(flag in arch_block for flag in ("-msse4.2", "-mpopcnt", "/d2archSSE42")):
     raise SystemExit("Post-patch check failed: a post-SSE2 compiler flag remains.")
 
@@ -129,5 +147,6 @@ if "#define ZSTD_DISABLE_ASM 1" not in patched_zstd:
 
 print("Godot 4.5.1 patched successfully.")
 print("CPU baseline: x86-64-v1 (SSE2).")
+print("BMI1/BMI2/LZCNT/POPCNT: explicitly disabled.")
 print("Windows SSE4.2 startup gate: removed.")
 print("Zstd dynamic BMI1/BMI2 path and x86 assembly: disabled.")

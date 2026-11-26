@@ -2,12 +2,6 @@ name: Build Godot 4.7.2 Windows x64 SSE2 ANGLE D3D11
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/build-windows-sse2-angle.yml"
-      - "scripts/**"
 
 permissions:
   contents: read

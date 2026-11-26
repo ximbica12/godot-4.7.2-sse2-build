@@ -47,7 +47,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $engine = (Resolve-Path 'dist/Godot_v4.5.1-stable_windows_x86_64_SSE2.exe').Path
-          New-Item -ItemType Directory -Force smoke | Out-Null
+          New-Item -ItemType Directory -Force smoke/.godot | Out-Null
           @'
           config_version=5
           [application]
@@ -60,20 +60,29 @@ jobs:
           [gd_scene format=3]
           [node name="Main" type="Node"]
           '@ | Set-Content smoke/main.tscn -Encoding utf8
+          # Exported/template builds expect this generated cache file even when the project has no global script classes.
+          [System.IO.File]::WriteAllText((Join-Path $PWD 'smoke/.godot/global_script_class_cache.cfg'), '')
+          $projectPath = (Resolve-Path 'smoke').Path
           $log = Join-Path $PWD 'dist/smoke-test.log'
-          & $engine --headless --path (Join-Path $PWD 'smoke') --quit-after 3 --log-file $log
-          if ($LASTEXITCODE -ne 0) { throw "Headless smoke test failed with exit code $LASTEXITCODE" }
+          $report = Join-Path $PWD 'dist/smoke-test-report.txt'
+          $arguments = @('--headless', '--path', $projectPath, '--quit-after', '3', '--log-file', $log)
+          $process = Start-Process -FilePath $engine -ArgumentList $arguments -Wait -PassThru -NoNewWindow
+          "Godot headless exit code: $($process.ExitCode)" | Set-Content $report
+          if ($process.ExitCode -ne 0) { throw "Headless smoke test failed with exit code $($process.ExitCode)" }
           if (-not (Test-Path $log)) { throw 'Godot did not create its smoke-test log.' }
           Get-Content $log
-          if (-not (Select-String -Path $log -Pattern 'Godot Engine v4\.5\.1' -Quiet)) {
-            throw 'Smoke-test log does not identify Godot 4.5.1.'
-          }
+          if (Select-String -Path $log -Pattern 'ERROR:|FATAL:' -Quiet) { throw 'Godot logged an error during the smoke test.' }
+          if (-not (Select-String -Path $log -Pattern 'Godot Engine v4\.5\.1' -Quiet)) { throw 'Smoke-test log does not identify Godot 4.5.1.' }
+          $hash = (Get-FileHash $engine -Algorithm SHA256).Hash
+          "SHA256: $hash" | Add-Content $report
 
       - name: Upload smoke-test report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Godot-4.5.1-SSE2-CANDIDATE-SMOKE-REPORT
-          path: dist/
+          path: |
+            dist/smoke-test.log
+            dist/smoke-test-report.txt
           if-no-files-found: warn
           retention-days: 14
